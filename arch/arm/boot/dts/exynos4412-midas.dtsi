@@ -23,6 +23,7 @@
 	aliases {
 		i2c11 = &i2c_max77693;
 		i2c12 = &i2c_max77693_fuel;
+		i2c13 = &i2c_an30259a;
 	};
 
 	chosen {
@@ -43,6 +44,20 @@
 		xusbxti {
 			compatible = "samsung,clock-xusbxti", "fixed-clock";
 			clock-frequency = <24000000>;
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ramoops@7f000000 {
+			compatible = "ramoops";
+			reg = <0x7f000000 0x100000>;
+			record-size = <0x00020000>;
+			console-size = <0x00020000>;
+			ftrace-size = <0x00020000>;
 		};
 	};
 
@@ -92,6 +107,39 @@
 		enable-active-high;
 	};
 
+	touchkey_reg: voltage-regulator-4 {
+		compatible = "regulator-fixed";
+		regulator-name = "VTOUCH_3.3V";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		enable-active-high;
+		status = "disabled";
+	};
+
+	vbatt_reg: voltage-regulator-9 {
+		compatible = "regulator-fixed";
+		regulator-name = "VBATT";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-always-on;
+	};
+
+	mic_bias_reg: voltage-regulator-10 {
+		compatible = "regulator-fixed";
+		regulator-name = "MICBIAS_LDO_2.8V";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&gpf1 7 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	submic_bias_reg: voltage-regulator-11 {
+		compatible = "regulator-fixed";
+		regulator-name = "SUB_MICBIAS_LDO_2.8V";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+	};
+
 	gpio-keys {
 		compatible = "gpio-keys";
 		pinctrl-names = "default";
@@ -136,7 +184,7 @@
 		#size-cells = <0>;
 		status = "okay";
 
-		max77693@66 {
+		max77693: max77693@66 {
 			compatible = "maxim,max77693";
 			interrupt-parent = <&gpx1>;
 			interrupts = <5 IRQ_TYPE_EDGE_FALLING>;
@@ -197,6 +245,54 @@
 		};
 	};
 
+	i2c_touchkey: i2c-gpio-4 {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpl0 2 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpl0 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		touchkey@20 {
+			compatible = "cypress,midas-touchkey";
+			reg = <0x20>;
+			vdd-supply = <&touchkey_reg>;
+			vcc-supply = <&ldo5_reg>;
+			interrupt-parent = <&gpj0>;
+			interrupts = <3 IRQ_TYPE_EDGE_FALLING>;
+		};
+	};
+
+	i2c_an30259a: i2c-gpio-5 {
+		compatible = "i2c-gpio";
+		gpios = <&gpf2 7 GPIO_ACTIVE_HIGH>, <&gpf2 6 GPIO_ACTIVE_HIGH>;
+		i2c-gpio,delay-us = <2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		an30259a@30 {
+			compatible = "panasonic,an30259a";
+			reg = <0x30>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			red@1 {
+				reg = <1>;
+				label = "red:notification";
+			};
+
+			green@2 {
+				reg = <2>;
+				label = "green:notification";
+			};
+
+			blue@3 {
+				reg = <3>;
+				label = "blue:notification";
+			};
+		};
+	};
+
 	i2c-mhl {
 		compatible = "i2c-gpio";
 		gpios = <&gpf0 4 GPIO_ACTIVE_HIGH>, <&gpf0 6 GPIO_ACTIVE_HIGH>;
@@ -234,16 +330,13 @@
 		clock-names = "ext_clock";
 	};
 
-	sound {
-		compatible = "samsung,trats2-audio";
-		samsung,i2s-controller = <&i2s0>;
-		samsung,model = "Trats2";
-		samsung,audio-codec = <&wm1811>;
-		samsung,audio-routing =
-			"SPK", "SPKOUTLN",
-			"SPK", "SPKOUTLP",
-			"SPK", "SPKOUTRN",
-			"SPK", "SPKOUTRP";
+	sound: sound {
+		compatible = "samsung,midas-audio";
+		i2s-controller = <&i2s0>;
+		model = "Midas";
+		mic-bias-supply = <&mic_bias_reg>;
+		submic-bias-supply = <&submic_bias_reg>;
+		audio-codec = <&wm1811>;
 	};
 
 	thermistor-ap {
@@ -560,11 +653,36 @@
 	wm1811: wm1811@1a {
 		compatible = "wlf,wm1811";
 		reg = <0x1a>;
-		clocks = <&pmu_system_controller 0>;
-		clock-names = "MCLK1";
-		DCVDD-supply = <&ldo3_reg>;
+		clocks = <&pmu_system_controller 0>,
+			<&max77686 MAX77686_CLK_PMIC>;
+		clock-names = "MCLK1", "MCLK2";
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		interrupt-parent = <&gpx3>;
+		interrupts = <6 IRQ_TYPE_LEVEL_HIGH>;
+
+		gpio-controller;
+		#gpio-cells = <2>;
+
+		wlf,gpio-cfg = <0x3 0x0 0x0 0x0 0x0 0x0
+			0x0 0x8000 0x0 0x0 0x0>;
+		wlf,micbias-cfg = <0x2f 0x2b>;
+
+		wlf,lineout1-feedback;
+		wlf,lineout1-se;
+		wlf,lineout2-se;
+		wlf,ldoena-always-driven;
+
+		AVDD2-supply = <&vbatt_reg>;
 		DBVDD1-supply = <&ldo3_reg>;
+		DBVDD2-supply = <&vbatt_reg>;
+		DBVDD3-supply = <&vbatt_reg>;
+		DCVDD-supply = <&ldo3_reg>;
+		CPVDD-supply = <&vbatt_reg>;
+		SPKVDD1-supply = <&vbatt_reg>;
+		SPKVDD2-supply = <&vbatt_reg>;
 		wlf,ldo1ena = <&gpj0 4 0>;
+		wlf,ldo2ena = <&gpj0 4 0>;
 	};
 };
 
@@ -896,8 +1014,20 @@
 };
 
 &pmu_system_controller {
+	compatible = "samsung,exynos4210-pmu", "syscon", "simple-mfd";
 	assigned-clocks = <&pmu_system_controller 0>;
 	assigned-clock-parents =  <&clock CLK_XUSBXTI>;
+
+
+	reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x80c>;
+
+		mode-normal = <0x12345670>;
+		mode-bootloader = <0x12345671>;
+		mode-download = <0x12345671>;
+		mode-recovery = <0x12345674>;
+	};
 };
 
 &pinctrl_0 {
@@ -1295,13 +1425,21 @@
 		reg = <1>;
 		compatible = "brcm,bcm4329-fmac";
 		interrupt-parent = <&gpx2>;
-		interrupts = <5 IRQ_TYPE_NONE>;
+		interrupts = <5 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-names = "host-wake";
 	};
 };
 
 &serial_0 {
 	status = "okay";
+
+	bluetooth {
+		compatible = "brcm,bcm43438-bt";
+		shutdown-gpios = <&gpl0 6 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpx3 1 GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpx2 6 GPIO_ACTIVE_HIGH>;
+		clocks = <&max77686 MAX77686_CLK_PMIC>;
+	};
 };
 
 &serial_1 {
