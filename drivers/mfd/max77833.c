@@ -21,63 +21,97 @@
  * This driver is based on max8997.c
  */
 
-#include <linux/module.h>
+#include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
+#include <linux/of.h>
+#include <linux/of_irq.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/pm_runtime.h>
+#include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/max77833.h>
 #include <linux/mfd/max77833-private.h>
 #include <linux/regulator/machine.h>
 
-#include <linux/muic/muic.h>
-#include <linux/muic/max77833-muic.h>
 
-#if defined (CONFIG_OF)
+//#include <linux/muic/muic.h> dead iface, use extcon and mfd
+//#include <linux/muic/max77833-muic.h> extcoooooooon/mfd
+
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
-#endif /* CONFIG_OF */
 
 #define I2C_ADDR_PMIC	(0x92 >> 1)	/* Top sys, Haptic */
 #define I2C_ADDR_MUIC	(0x4A >> 1)
 #define I2C_ADDR_FG     (0x6C >> 1)
 
-static struct mfd_cell max77833_devs[] = {
-#if defined(CONFIG_MUIC_MAX77833)
-	{ .name = MUIC_DEV_NAME, },
-#endif /* CONFIG_MUIC_MAX77833 */
-#if defined(CONFIG_REGULATOR_MAX77833)
-	{ .name = "max77833-safeout", },
-#endif /* CONFIG_REGULATOR_MAX77833 */
-#if defined(CONFIG_FUELGAUGE_MAX77833)
-	{ .name = "max77833-fuelgauge", },
-#endif
-#if defined(CONFIG_CHARGER_MAX77833)
-	{ .name = "max77833-charger", },
-#endif
-#if defined(CONFIG_MOTOR_DRV_MAX77833)
-	{ .name = "max77833-haptic", },
-#endif /* CONFIG_MAX77833_HAPTIC */
-#if defined(CONFIG_LEDS_MAX77833_RGB)
-	{ .name = "leds-max77833-rgb", },
-#endif /* CONFIG_LEDS_MAX77833_RGB */
-#if defined(CONFIG_LEDS_MAX77833_FLASH)
-	{ .name = "max77833-flash", },
-#endif
+static const struct mfd_cell max77833_devs[] = {
+	{
+		.name = MUIC_DEV_NAME,
+	},{
+		.name = "max77833-safeout",
+		.of_compatible = "maxim,max77833-safeout'
+	},{
+		.name = "max77833-fuelgauge",
+		.of_compatible = "maxim,max77833-fuelgauge'
+	},{
+		.name = "max77833-charger",
+		.of_compatible = "maxim,max77833-charger'
+	},{
+		.name = "max77833-haptic",
+		.of_compatible = "maxim,max77833-haptic'
+	},{
+		.name = "leds-max77833-rgb",
+		.of_compatible = "maxim,max77833-rgb'
+	},{
+		.name = "max77833-flash",
+		.of_compatible = "maxim,max77833-flash'
+	},
 };
+
+
+static const struct regmap_config max77833_charger_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+	.max_register = MAX77833_CHG_REG_END,
+}
+
+static const struct regmap_config max77833_regmap_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+	.max_register = MAX77833_CHG_END,
+}
+
+static const struct regmap_config max77833_regmap_muic_config = {
+	.reg_bits = 8,
+	.val_bits = 8,
+	.max_register = MAX77833_MUIC_CHG_END,
+}
+
+static const struct regmap_irq max77833_irqs[] = {
+	// TOPSYS INTERRUPTS
+	//todo
+	MAX77833_SYSTEM_IRQ_T100C_INT,
+	MAX77833_SYSTEM_IRQ_T120C_INT,
+	MAX77833_SYSTEM_IRQ_T140C_INT,
+	MAX77833_SYSTEM_IRQ_I2C_WD_INT,
+	MAX77833_SYSTEM_IRQ_SYSUVLO_INT,
+	MAX77833_SYSTEM_IRQ_MRSTB_INT,
+	MAX77833_SYSTEM_IRQ_TS_INT,
+}
 
 int max77833_read_reg(struct i2c_client *i2c, u8 reg, u8 *dest)
 {
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_read_byte_data(i2c, reg);
-	mutex_unlock(&max77833->i2c_lock);
+	mutex_unlock(&max77833->iolock);
 	if (ret < 0) {
-		pr_info("%s:%s reg(0x%x), ret(%d)\n", MFD_DEV_NAME, __func__, reg, ret);
+		//pr_info("%s:%s reg(0x%x), ret(%d)\n", MFD_DEV_NAME, __func__, reg, ret);
 		return ret;
 	}
 
@@ -92,9 +126,9 @@ int max77833_bulk_read(struct i2c_client *i2c, u8 reg, int count, u8 *buf)
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_read_i2c_block_data(i2c, reg, count, buf);
-	mutex_unlock(&max77833->i2c_lock);
+	mutex_unlock(&max77833->iolock);
 	if (ret < 0)
 		return ret;
 
@@ -107,9 +141,9 @@ int max77833_read_word(struct i2c_client *i2c, u8 reg)
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_read_word_data(i2c, reg);
-	mutex_unlock(&max77833->i2c_lock);
+	mutex_unlock(&max77833->iolock);
 	if (ret < 0)
 		return ret;
 
@@ -122,12 +156,12 @@ int max77833_write_reg(struct i2c_client *i2c, u8 reg, u8 value)
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_write_byte_data(i2c, reg, value);
-	mutex_unlock(&max77833->i2c_lock);
-	if (ret < 0)
-		pr_info("%s:%s reg(0x%x), ret(%d)\n",
-				MFD_DEV_NAME, __func__, reg, ret);
+	mutex_unlock(&max77833->iolock);
+	//if (ret < 0)
+	//	pr_info("%s:%s reg(0x%x), ret(%d)\n",
+	//			MFD_DEV_NAME, __func__, reg, ret);
 
 	return ret;
 }
@@ -138,9 +172,9 @@ int max77833_bulk_write(struct i2c_client *i2c, u8 reg, int count, u8 *buf)
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_write_i2c_block_data(i2c, reg, count, buf);
-	mutex_unlock(&max77833->i2c_lock);
+	mutex_unlock(&max77833->iolock);
 	if (ret < 0)
 		return ret;
 
@@ -153,9 +187,9 @@ int max77833_write_word(struct i2c_client *i2c, u8 reg, u16 value)
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_write_word_data(i2c, reg, value);
-	mutex_unlock(&max77833->i2c_lock);
+	mutex_unlock(&max77833->iolock);
 	if (ret < 0)
 		return ret;
 	return 0;
@@ -167,14 +201,14 @@ int max77833_update_reg(struct i2c_client *i2c, u8 reg, u8 val, u8 mask)
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int ret;
 
-	mutex_lock(&max77833->i2c_lock);
+	mutex_lock(&max77833->iolock);
 	ret = i2c_smbus_read_byte_data(i2c, reg);
 	if (ret >= 0) {
 		u8 old_val = ret & 0xff;
 		u8 new_val = (val & mask) | (old_val & (~mask));
 		ret = i2c_smbus_write_byte_data(i2c, reg, new_val);
 	}
-	mutex_unlock(&max77833->i2c_lock);
+	mutex_unlock(&max77833->iolock);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(max77833_update_reg);
@@ -183,7 +217,7 @@ int max77833_read_fg(struct i2c_client *i2c, u16 reg, u16 *dest)
 {
 	int ret;
 	struct i2c_msg msg[2];
-	u8 wbuf[2], rbuf[2]; 
+	u8 wbuf[2], rbuf[2];
 
 	if (!i2c->adapter) {
 		pr_err("%s: Could not find adapter!\n", __func__);
@@ -263,19 +297,21 @@ static int of_max77833_dt(struct device *dev, struct max77833_platform_data *pda
 }
 #endif /* CONFIG_OF */
 
-static int max77833_i2c_probe(struct i2c_client *i2c,
-				const struct i2c_device_id *dev_id)
+static int max77833_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *dev_id)
 {
 	struct max77833_dev *max77833;
-	struct max77833_platform_data *pdata = i2c->dev.platform_data;
-
-	u8 reg_data;
-	u16 reg16_data;
+	struct max77833_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	int ret = 0;
 
-	pr_info("%s:%s\n", MFD_DEV_NAME, __func__);
+	unsigned int reg_data;
+	u16 reg16_data;
 
-	max77833 = kzalloc(sizeof(struct max77833_dev), GFP_KERNEL);
+	//pr_info("%s:%s\n", MFD_DEV_NAME, __func__);
+
+	max77833 = devm_kzalloc(&i2c->dev, sizeof(struct max77833_dev),
+			GFP_KERNEL);
+
+
 	if (!max77833) {
 		dev_err(&i2c->dev, "%s: Failed to alloc mem for max77833\n", __func__);
 		return -ENOMEM;
@@ -313,15 +349,17 @@ static int max77833_i2c_probe(struct i2c_client *i2c,
 			ret = -EINVAL;
 			goto err;
 		} else
-			max77833->irq_base = pdata->irq_base;
 
+
+
+		max77833->irq_base = pdata->irq_base;
 		max77833->irq_gpio = pdata->irq_gpio;
-		max77833->wakeup = pdata->wakeup;
+		//max77833->wakeup = pdata->wakeup;
 	} else {
 		ret = -EINVAL;
 		goto err;
 	}
-	mutex_init(&max77833->i2c_lock);
+	//mutex_init(&max77833->iolock); unused it seems
 
 	i2c_set_clientdata(i2c, max77833);
 
@@ -347,9 +385,18 @@ static int max77833_i2c_probe(struct i2c_client *i2c,
 			MAX77833_PMIC_REG_SAFEOUT_CTRL, reg_data);
 
 	max77833->muic = i2c_new_dummy(i2c->adapter, I2C_ADDR_MUIC);
+	if (!max77693->muic) {
+               dev_err(max77693->dev, "Failed to allocate I2C device for MUIC\n");
+               return -ENODEV;
+        }
 	i2c_set_clientdata(max77833->muic, max77833);
 
 	max77833->fuelgauge = i2c_new_dummy(i2c->adapter, I2C_ADDR_FG);
+	if (!max77693->fuelgauge) {
+                dev_err(max77693->dev, "Failed to allocate I2C device for Fuelgauge\n");
+                ret = -ENODEV;
+                goto err;
+	}
 	i2c_set_clientdata(max77833->fuelgauge, max77833);
 
 	/* checking pass5 in OTP */
@@ -379,31 +426,20 @@ err_mfd:
 err_irq_init:
 	i2c_unregister_device(max77833->muic);
 err_w_lock:
-	mutex_destroy(&max77833->i2c_lock);
+	mutex_destroy(&max77833->iolock);
 err:
 	kfree(max77833);
 	return ret;
 }
 
-static int max77833_i2c_remove(struct i2c_client *i2c)
-{
-	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
-
-	mfd_remove_devices(max77833->dev);
-	i2c_unregister_device(max77833->muic);
-	kfree(max77833);
-
-	return 0;
-}
 
 static const struct i2c_device_id max77833_i2c_id[] = {
 	{ MFD_DEV_NAME, TYPE_MAX77833 },
 	{ }
 };
-MODULE_DEVICE_TABLE(i2c, max77833_i2c_id);
 
 #if defined(CONFIG_OF)
-static struct of_device_id max77833_i2c_dt_ids[] = {
+static const struct of_device_id max77833_i2c_dt_ids[] = {
 	{ .compatible = "maxim,max77833" },
 	{ },
 };
@@ -413,9 +449,10 @@ MODULE_DEVICE_TABLE(of, max77833_i2c_dt_ids);
 #if defined(CONFIG_PM)
 static int max77833_suspend(struct device *dev)
 {
-	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
+	struct i2c_client *i2c = to_i2c_client(dev);
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 
+	//disable_irq(max77833->irq);
 	if (device_may_wakeup(dev))
 		enable_irq_wake(max77833->irq);
 
@@ -423,15 +460,15 @@ static int max77833_suspend(struct device *dev)
 
 	return 0;
 }
-
+//todo:work on suspend/resume
 static int max77833_resume(struct device *dev)
 {
-	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
+	struct i2c_client *i2c = to_i2c_client(dev);
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 
-#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
-	pr_info("%s:%s\n", MFD_DEV_NAME, __func__);
-#endif /* CONFIG_SAMSUNG_PRODUCT_SHIP */
+//#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
+//	pr_info("%s:%s\n", MFD_DEV_NAME, __func__);
+//#endif /* CONFIG_SAMSUNG_PRODUCT_SHIP */
 
 	if (device_may_wakeup(dev))
 		disable_irq_wake(max77833->irq);
@@ -512,7 +549,7 @@ u8 max77833_dumpaddr_led[] = {
 
 static int max77833_freeze(struct device *dev)
 {
-	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
+	struct i2c_client *i2c = to_i2c_client(dev);
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int i;
 
@@ -535,7 +572,7 @@ static int max77833_freeze(struct device *dev)
 
 static int max77833_restore(struct device *dev)
 {
-	struct i2c_client *i2c = container_of(dev, struct i2c_client, dev);
+	struct i2c_client *i2c = to_i2c_client(dev);
 	struct max77833_dev *max77833 = i2c_get_clientdata(i2c);
 	int i;
 
@@ -557,29 +594,28 @@ static int max77833_restore(struct device *dev)
 }
 #endif
 
-const struct dev_pm_ops max77833_pm = {
+static const struct dev_pm_ops max77833_pm = {
 	.suspend = max77833_suspend,
 	.resume = max77833_resume,
-#ifdef CONFIG_HIBERNATION
+//#ifdef CONFIG_HIBERNATION
 	.freeze =  max77833_freeze,
 	.thaw = max77833_restore,
 	.restore = max77833_restore,
-#endif
+//#endif
 };
 
 static struct i2c_driver max77833_i2c_driver = {
 	.driver		= {
 		.name	= MFD_DEV_NAME,
-		.owner	= THIS_MODULE,
 #if defined(CONFIG_PM)
 		.pm	= &max77833_pm,
 #endif /* CONFIG_PM */
 #if defined(CONFIG_OF)
+		.suppress_bind_attrs = true,
 		.of_match_table	= max77833_i2c_dt_ids,
 #endif /* CONFIG_OF */
 	},
 	.probe		= max77833_i2c_probe,
-	.remove		= max77833_i2c_remove,
 	.id_table	= max77833_i2c_id,
 };
 
@@ -590,13 +626,3 @@ static int __init max77833_i2c_init(void)
 }
 /* init early so consumer devices can complete system boot */
 subsys_initcall(max77833_i2c_init);
-
-static void __exit max77833_i2c_exit(void)
-{
-	i2c_del_driver(&max77833_i2c_driver);
-}
-module_exit(max77833_i2c_exit);
-
-MODULE_DESCRIPTION("MAXIM 77833 multi-function core driver");
-MODULE_AUTHOR("SeoYoung Jeong <seo0.jeong@samsung.com>");
-MODULE_LICENSE("GPL");

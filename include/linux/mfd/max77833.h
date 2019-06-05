@@ -27,6 +27,7 @@
 
 #ifndef __MAX77833_H__
 #define __MAX77833_H__
+
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 

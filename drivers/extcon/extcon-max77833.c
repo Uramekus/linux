@@ -1,361 +1,301 @@
 // SPDX-License-Identifier: GPL-2.0+
 //
-// extcon-max77833.c - Maxim MAX77833 extcon driver to support
-//			MUIC(Micro USB Interface Controller)
+// extcon-max8997.c - MAX8997 extcon driver to support MAX8997 MUIC
 //
-// Copyright (C) 2015 Samsung Electronics
-// Author: Jaewon Kim <jaewon02.kim@samsung.com>
+//  Copyright (C) 2012 Samsung Electronics
+//  Donggeun Kim <dg77.kim@samsung.com>
 
-#include <linux/extcon-provider.h>
-#include <linux/i2c.h>
-#include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/mfd/max77693-common.h>
-//#include <linux/mfd/max77833-private.h>
 #include <linux/module.h>
+#include <linux/i2c.h>
+#include <linux/slab.h>
+#include <linux/interrupt.h>
+#include <linux/err.h>
 #include <linux/platform_device.h>
-#include <linux/workqueue.h>
+#include <linux/kobject.h>
+#include <linux/mfd/max8997.h>
+#include <linux/mfd/max8997-private.h>
+#include <linux/extcon-provider.h>
+#include <linux/irqdomain.h>
 
-#define DELAY_MS_DEFAULT		15000	/* unit: millisecond */
+#define	DEV_NAME			"max8997-muic"
+#define	DELAY_MS_DEFAULT		20000		/* unit: millisecond */
 
-enum max77833_muic_status {
-	MAX77833_MUIC_STATUS1 = 0,
-	MAX77833_MUIC_STATUS2,
-	MAX77833_MUIC_STATUS3,
-
-	MAX77833_MUIC_STATUS_NUM,
+enum max8997_muic_adc_debounce_time {
+	ADC_DEBOUNCE_TIME_0_5MS = 0,	/* 0.5ms */
+	ADC_DEBOUNCE_TIME_10MS,		/* 10ms */
+	ADC_DEBOUNCE_TIME_25MS,		/* 25ms */
+	ADC_DEBOUNCE_TIME_38_62MS,	/* 38.62ms */
 };
 
-struct max77833_muic_info {
+struct max8997_muic_irq {
+	unsigned int irq;
+	const char *name;
+	unsigned int virq;
+};
+
+static struct max8997_muic_irq muic_irqs[] = {
+	{ MAX8997_MUICIRQ_ADCError,	"muic-ADCERROR" },
+	{ MAX8997_MUICIRQ_ADCLow,	"muic-ADCLOW" },
+	{ MAX8997_MUICIRQ_ADC,		"muic-ADC" },
+	{ MAX8997_MUICIRQ_VBVolt,	"muic-VBVOLT" },
+	{ MAX8997_MUICIRQ_DBChg,	"muic-DBCHG" },
+	{ MAX8997_MUICIRQ_DCDTmr,	"muic-DCDTMR" },
+	{ MAX8997_MUICIRQ_ChgDetRun,	"muic-CHGDETRUN" },
+	{ MAX8997_MUICIRQ_ChgTyp,	"muic-CHGTYP" },
+	{ MAX8997_MUICIRQ_OVP,		"muic-OVP" },
+};
+
+/* Define supported cable type */
+enum max8997_muic_acc_type {
+	MAX8997_MUIC_ADC_GROUND = 0x0,
+	MAX8997_MUIC_ADC_MHL,			/* MHL*/
+	MAX8997_MUIC_ADC_REMOTE_S1_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S2_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S3_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S4_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S5_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S6_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S7_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S8_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S9_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S10_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S11_BUTTON,
+	MAX8997_MUIC_ADC_REMOTE_S12_BUTTON,
+	MAX8997_MUIC_ADC_RESERVED_ACC_1,
+	MAX8997_MUIC_ADC_RESERVED_ACC_2,
+	MAX8997_MUIC_ADC_RESERVED_ACC_3,
+	MAX8997_MUIC_ADC_RESERVED_ACC_4,
+	MAX8997_MUIC_ADC_RESERVED_ACC_5,
+	MAX8997_MUIC_ADC_CEA936_AUDIO,
+	MAX8997_MUIC_ADC_PHONE_POWERED_DEV,
+	MAX8997_MUIC_ADC_TTY_CONVERTER,
+	MAX8997_MUIC_ADC_UART_CABLE,
+	MAX8997_MUIC_ADC_CEA936A_TYPE1_CHG,
+	MAX8997_MUIC_ADC_FACTORY_MODE_USB_OFF,	/* JIG-USB-OFF */
+	MAX8997_MUIC_ADC_FACTORY_MODE_USB_ON,	/* JIG-USB-ON */
+	MAX8997_MUIC_ADC_AV_CABLE_NOLOAD,	/* DESKDOCK */
+	MAX8997_MUIC_ADC_CEA936A_TYPE2_CHG,
+	MAX8997_MUIC_ADC_FACTORY_MODE_UART_OFF,	/* JIG-UART */
+	MAX8997_MUIC_ADC_FACTORY_MODE_UART_ON,	/* CARDOCK */
+	MAX8997_MUIC_ADC_AUDIO_MODE_REMOTE,
+	MAX8997_MUIC_ADC_OPEN,			/* OPEN */
+};
+
+enum max8997_muic_cable_group {
+	MAX8997_CABLE_GROUP_ADC = 0,
+	MAX8997_CABLE_GROUP_ADC_GND,
+	MAX8997_CABLE_GROUP_CHG,
+	MAX8997_CABLE_GROUP_VBVOLT,
+};
+
+enum max8997_muic_usb_type {
+	MAX8997_USB_HOST,
+	MAX8997_USB_DEVICE,
+};
+
+enum max8997_muic_charger_type {
+	MAX8997_CHARGER_TYPE_NONE = 0,
+	MAX8997_CHARGER_TYPE_USB,
+	MAX8997_CHARGER_TYPE_DOWNSTREAM_PORT,
+	MAX8997_CHARGER_TYPE_DEDICATED_CHG,
+	MAX8997_CHARGER_TYPE_500MA,
+	MAX8997_CHARGER_TYPE_1A,
+	MAX8997_CHARGER_TYPE_DEAD_BATTERY = 7,
+};
+
+struct max8997_muic_info {
 	struct device *dev;
-	struct max77693_dev *max77833;
+	struct i2c_client *muic;
 	struct extcon_dev *edev;
-
-	struct mutex mutex;
-	struct work_struct irq_work;
-	struct delayed_work wq_detcable;
-
-	u8 status[MAX77833_MUIC_STATUS_NUM];
 	int prev_cable_type;
 	int prev_chg_type;
-	int prev_gnd_type;
+	u8 status[2];
 
-	bool irq_adc;
-	bool irq_chg;
-};
+	int irq;
+	struct work_struct irq_work;
+	struct mutex mutex;
 
-enum max77833_muic_cable_group {
-	MAX77833_CABLE_GROUP_ADC = 0,
-	MAX77833_CABLE_GROUP_ADC_GND,
-	MAX77833_CABLE_GROUP_CHG,
-};
-
-enum max77833_muic_adc_debounce_time {
-	MAX77833_DEBOUNCE_TIME_5MS = 0,
-	MAX77833_DEBOUNCE_TIME_10MS,
-	MAX77833_DEBOUNCE_TIME_25MS,
-	MAX77833_DEBOUNCE_TIME_38_62MS,
-};
-
-/* Define accessory cable type */
-enum max77833_muic_accessory_type {
-	MAX77833_MUIC_ADC_GROUND = 0,
-	MAX77833_MUIC_ADC_SEND_END_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S1_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S2_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S3_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S4_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S5_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S6_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S7_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S8_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S9_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S10_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S11_BUTTON,
-	MAX77833_MUIC_ADC_REMOTE_S12_BUTTON,
-	MAX77833_MUIC_ADC_RESERVED_ACC_1,
-	MAX77833_MUIC_ADC_RESERVED_ACC_2,
-	MAX77833_MUIC_ADC_RESERVED_ACC_3, /* SmartDock */
-	MAX77833_MUIC_ADC_RESERVED_ACC_4,
-	MAX77833_MUIC_ADC_RESERVED_ACC_5,
-	MAX77833_MUIC_ADC_AUDIO_DEVICE_TYPE2,
-	MAX77833_MUIC_ADC_PHONE_POWERED_DEV,
-	MAX77833_MUIC_ADC_TTY_CONVERTER,
-	MAX77833_MUIC_ADC_UART_CABLE,
-	MAX77833_MUIC_ADC_CEA936A_TYPE1_CHG,
-	MAX77833_MUIC_ADC_FACTORY_MODE_USB_OFF,
-	MAX77833_MUIC_ADC_FACTORY_MODE_USB_ON,
-	MAX77833_MUIC_ADC_AV_CABLE_NOLOAD,
-	MAX77833_MUIC_ADC_CEA936A_TYPE2_CHG,
-	MAX77833_MUIC_ADC_FACTORY_MODE_UART_OFF,
-	MAX77833_MUIC_ADC_FACTORY_MODE_UART_ON,
-	MAX77833_MUIC_ADC_AUDIO_DEVICE_TYPE1,
-	MAX77833_MUIC_ADC_OPEN,
+	struct max8997_muic_platform_data *muic_pdata;
+	enum max8997_muic_charger_type pre_charger_type;
 
 	/*
-	 * The below accessories should check
-	 * not only ADC value but also ADC1K and VBVolt value.
+	 * Use delayed workqueue to detect cable state and then
+	 * notify cable state to notifiee/platform through uevent.
+	 * After completing the booting of platform, the extcon provider
+	 * driver should notify cable state to upper layer.
 	 */
-						/* Offset|ADC1K|VBVolt| */
-	MAX77833_MUIC_GND_USB_HOST = 0x100,	/*    0x1|    0|     0| */
-	MAX77833_MUIC_GND_USB_HOST_VB = 0x101,	/*    0x1|    0|     1| */
-	MAX77833_MUIC_GND_MHL = 0x102,		/*    0x1|    1|     0| */
-	MAX77833_MUIC_GND_MHL_VB = 0x103,	/*    0x1|    1|     1| */
+	struct delayed_work wq_detcable;
+
+	/*
+	 * Default usb/uart path whether UART/USB or AUX_UART/AUX_USB
+	 * h/w path of COMP2/COMN1 on CONTROL1 register.
+	 */
+	int path_usb;
+	int path_uart;
 };
 
-/* Define charger cable type */
-enum max77833_muic_charger_type {
-	MAX77833_MUIC_CHG_NONE = 0,
-	MAX77833_MUIC_CHG_USB,
-	MAX77833_MUIC_CHG_DOWNSTREAM,
-	MAX77833_MUIC_CHG_DEDICATED,
-	MAX77833_MUIC_CHG_SPECIAL_500MA,
-	MAX77833_MUIC_CHG_SPECIAL_1A,
-	MAX77833_MUIC_CHG_SPECIAL_BIAS,
-	MAX77833_MUIC_CHG_RESERVED,
-	MAX77833_MUIC_CHG_GND,
-	MAX77833_MUIC_CHG_DOCK,
-};
-
-static const unsigned int max77833_extcon_cable[] = {
+static const unsigned int max8997_extcon_cable[] = {
 	EXTCON_USB,
 	EXTCON_USB_HOST,
 	EXTCON_CHG_USB_SDP,
 	EXTCON_CHG_USB_DCP,
-	EXTCON_CHG_USB_CDP,
 	EXTCON_CHG_USB_FAST,
 	EXTCON_CHG_USB_SLOW,
+	EXTCON_CHG_USB_CDP,
 	EXTCON_DISP_MHL,
 	EXTCON_DOCK,
 	EXTCON_JIG,
 	EXTCON_NONE,
 };
 
-struct max77833_muic_irq {
-	unsigned int irq;
-	const char *name;
-	unsigned int virq;
-};
-
-static struct max77833_muic_irq max77833_muic_irqs[] = {
-	{ MAX77833_MUIC_IRQ_INT1_ADC,		"MUIC-ADC" },
-	{ MAX77833_MUIC_IRQ_INT1_ADCERROR,	"MUIC-ADC_ERROR" },
-	{ MAX77833_MUIC_IRQ_INT1_ADC1K,		"MUIC-ADC1K" },
-	{ MAX77833_MUIC_IRQ_INT2_CHGTYP,	"MUIC-CHGTYP" },
-	{ MAX77833_MUIC_IRQ_INT2_CHGDETRUN,	"MUIC-CHGDETRUN" },
-	{ MAX77833_MUIC_IRQ_INT2_DCDTMR,	"MUIC-DCDTMR" },
-	{ MAX77833_MUIC_IRQ_INT2_DXOVP,		"MUIC-DXOVP" },
-	{ MAX77833_MUIC_IRQ_INT2_VBVOLT,	"MUIC-VBVOLT" },
-	{ MAX77833_MUIC_IRQ_INT3_VBADC,		"MUIC-VBADC" },
-	{ MAX77833_MUIC_IRQ_INT3_VDNMON,	"MUIC-VDNMON" },
-	{ MAX77833_MUIC_IRQ_INT3_DNRES,		"MUIC-DNRES" },
-	{ MAX77833_MUIC_IRQ_INT3_MPNACK,	"MUIC-MPNACK"},
-	{ MAX77833_MUIC_IRQ_INT3_MRXBUFOW,	"MUIC-MRXBUFOW"},
-	{ MAX77833_MUIC_IRQ_INT3_MRXTRF,	"MUIC-MRXTRF"},
-	{ MAX77833_MUIC_IRQ_INT3_MRXPERR,	"MUIC-MRXPERR"},
-	{ MAX77833_MUIC_IRQ_INT3_MRXRDY,	"MUIC-MRXRDY"},
-};
-
-static const struct regmap_config max77833_muic_regmap_config = {
-	.reg_bits       = 8,
-	.val_bits       = 8,
-	.max_register   = MAX77833_MUIC_REG_END,
-};
-
-static const struct regmap_irq max77833_muic_irq[] = {
-	/* INT1 interrupt */
-	{ .reg_offset = 0, .mask = MAX77833_MUIC_ADC, },
-	{ .reg_offset = 0, .mask = MAX77833_MUIC_ADCERROR, },
-	{ .reg_offset = 0, .mask = MAX77833_MUIC_ADC1K, },
-
-	/* INT2 interrupt */
-	{ .reg_offset = 1, .mask = MAX77833_MUIC_CHGTYP, },
-	{ .reg_offset = 1, .mask = MAX77833_MUIC_CHGDETRUN, },
-	{ .reg_offset = 1, .mask = MAX77833_MUIC_DCDTMR, },
-	{ .reg_offset = 1, .mask = MAX77833_MUIC_DXOVP, },
-	{ .reg_offset = 1, .mask = MAX77833_MUIC_VBVOLT, },
-
-	/* INT3 interrupt */
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_VBADC, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_VDNMON, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_DNRES, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_MPNACK, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_MRXBUFOW, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_MRXTRF, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_MRXPERR, },
-	{ .reg_offset = 2, .mask = MAX77833_MUIC_MRXRDY, },
-};
-
-static const struct regmap_irq_chip max77833_muic_irq_chip = {
-	.name           = "max77833-muic",
-	.status_base    = MAX77833_MUIC_REG_INT1,
-	.mask_base      = MAX77833_MUIC_REG_INTMASK1,
-	.mask_invert    = true,
-	.num_regs       = 3,
-	.irqs           = max77833_muic_irq,
-	.num_irqs       = ARRAY_SIZE(max77833_muic_irq),
-};
-
-static int max77833_muic_set_path(struct max77833_muic_info *info,
-		u8 val, bool attached, bool nobccomp)
+/*
+ * max8997_muic_set_debounce_time - Set the debounce time of ADC
+ * @info: the instance including private data of max8997 MUIC
+ * @time: the debounce time of ADC
+ */
+static int max8997_muic_set_debounce_time(struct max8997_muic_info *info,
+		enum max8997_muic_adc_debounce_time time)
 {
-	struct max77693_dev *max77833 = info->max77833;
-	int ret = 0;
-	unsigned int ctrl1, ctrl2;
+	int ret;
+
+	switch (time) {
+	case ADC_DEBOUNCE_TIME_0_5MS:
+	case ADC_DEBOUNCE_TIME_10MS:
+	case ADC_DEBOUNCE_TIME_25MS:
+	case ADC_DEBOUNCE_TIME_38_62MS:
+		ret = max8997_update_reg(info->muic,
+					  MAX8997_MUIC_REG_CONTROL3,
+					  time << CONTROL3_ADCDBSET_SHIFT,
+					  CONTROL3_ADCDBSET_MASK);
+		if (ret) {
+			dev_err(info->dev, "failed to set ADC debounce time\n");
+			return ret;
+		}
+		break;
+	default:
+		dev_err(info->dev, "invalid ADC debounce time\n");
+		return -EINVAL;
+	}
+
+	return 0;
+};
+
+/*
+ * max8997_muic_set_path - Set hardware line according to attached cable
+ * @info: the instance including private data of max8997 MUIC
+ * @value: the path according to attached cable
+ * @attached: the state of cable (true:attached, false:detached)
+ *
+ * The max8997 MUIC device share outside H/W line among a varity of cables,
+ * so this function set internal path of H/W line according to the type of
+ * attached cable.
+ */
+static int max8997_muic_set_path(struct max8997_muic_info *info,
+		u8 val, bool attached)
+{
+	int ret;
+	u8 ctrl1, ctrl2 = 0;
 
 	if (attached)
 		ctrl1 = val;
 	else
-		ctrl1 = MAX77833_MUIC_CONTROL1_SW_OPEN;
-	if (nobccomp) {
-		/* Disable BC1.2 protocol and force manual switch control */
-		ctrl1 |= MAX77833_MUIC_CONTROL1_NOBCCOMP_MASK;
-	}
+		ctrl1 = CONTROL1_SW_OPEN;
 
-	ret = regmap_update_bits(max77833->regmap_muic,
-			MAX77833_MUIC_REG_CONTROL1,
-			MAX77833_MUIC_CONTROL1_COM_SW |
-				MAX77833_MUIC_CONTROL1_NOBCCOMP_MASK,
-			ctrl1);
+	ret = max8997_update_reg(info->muic,
+			MAX8997_MUIC_REG_CONTROL1, ctrl1, COMP_SW_MASK);
 	if (ret < 0) {
-		dev_err(info->dev, "Cannot switch MUIC port\n");
+		dev_err(info->dev, "failed to update MUIC register\n");
 		return ret;
 	}
 
 	if (attached)
-		ctrl2 = MAX77833_MUIC_CONTROL2_CPEN_MASK;
+		ctrl2 |= CONTROL2_CPEN_MASK;	/* LowPwr=0, CPEn=1 */
 	else
-		ctrl2 = MAX77833_MUIC_CONTROL2_LOWPWR_MASK;
+		ctrl2 |= CONTROL2_LOWPWR_MASK;	/* LowPwr=1, CPEn=0 */
 
-	ret = regmap_update_bits(max77833->regmap_muic,
-			MAX77833_MUIC_REG_CONTROL2,
-			MAX77833_MUIC_CONTROL2_LOWPWR_MASK |
-			MAX77833_MUIC_CONTROL2_CPEN_MASK, ctrl2);
+	ret = max8997_update_reg(info->muic,
+			MAX8997_MUIC_REG_CONTROL2, ctrl2,
+			CONTROL2_LOWPWR_MASK | CONTROL2_CPEN_MASK);
 	if (ret < 0) {
-		dev_err(info->dev, "Cannot update lowpower mode\n");
+		dev_err(info->dev, "failed to update MUIC register\n");
 		return ret;
 	}
 
-	dev_dbg(info->dev,
+	dev_info(info->dev,
 		"CONTROL1 : 0x%02x, CONTROL2 : 0x%02x, state : %s\n",
 		ctrl1, ctrl2, attached ? "attached" : "detached");
 
 	return 0;
 }
 
-static void max77833_charger_set_otg_vbus(struct max77833_muic_info *info,
-		 bool on)
+/*
+ * max8997_muic_get_cable_type - Return cable type and check cable state
+ * @info: the instance including private data of max8997 MUIC
+ * @group: the path according to attached cable
+ * @attached: store cable state and return
+ *
+ * This function check the cable state either attached or detached,
+ * and then divide precise type of cable according to cable group.
+ *	- MAX8997_CABLE_GROUP_ADC
+ *	- MAX8997_CABLE_GROUP_CHG
+ */
+static int max8997_muic_get_cable_type(struct max8997_muic_info *info,
+		enum max8997_muic_cable_group group, bool *attached)
 {
-	struct max77693_dev *max77833 = info->max77833;
-	unsigned int cnfg00;
-
-	if (on)
-		cnfg00 = MAX77833_CHG_OTG_MASK | MAX77833_CHG_BOOST_MASK;
-	else
-		cnfg00 = MAX77833_CHG_ENABLE | MAX77833_CHG_BUCK_MASK;
-
-	regmap_update_bits(max77833->regmap_chg, MAX77833_CHG_REG_CHG_CNFG_00,
-			   MAX77833_CHG_MODE_MASK, cnfg00);
-}
-
-static int max77833_muic_get_cable_type(struct max77833_muic_info *info,
-		enum max77833_muic_cable_group group, bool *attached)
-{
-	int adc, chg_type, cable_type, gnd_type;
-
-	adc = info->status[MAX77833_MUIC_STATUS1] &
-			MAX77833_MUIC_STATUS1_ADC_MASK;
-	adc >>= MAX77833_MUIC_STATUS1_ADC_SHIFT;
+	int cable_type = 0;
+	int adc;
+	int chg_type;
 
 	switch (group) {
-	case MAX77833_CABLE_GROUP_ADC:
-		if (adc == MAX77833_MUIC_ADC_OPEN) {
+	case MAX8997_CABLE_GROUP_ADC:
+		/*
+		 * Read ADC value to check cable type and decide cable state
+		 * according to cable type
+		 */
+		adc = info->status[0] & STATUS1_ADC_MASK;
+		adc >>= STATUS1_ADC_SHIFT;
+
+		/*
+		 * Check current cable state/cable type and store cable type
+		 * (info->prev_cable_type) for handling cable when cable is
+		 * detached.
+		 */
+		if (adc == MAX8997_MUIC_ADC_OPEN) {
 			*attached = false;
+
 			cable_type = info->prev_cable_type;
-			info->prev_cable_type = MAX77833_MUIC_ADC_OPEN;
+			info->prev_cable_type = MAX8997_MUIC_ADC_OPEN;
 		} else {
 			*attached = true;
+
 			cable_type = info->prev_cable_type = adc;
 		}
 		break;
-	case MAX77833_CABLE_GROUP_CHG:
-		chg_type = info->status[MAX77833_MUIC_STATUS2] &
-				MAX77833_MUIC_STATUS2_CHGTYP_MASK;
+	case MAX8997_CABLE_GROUP_CHG:
+		/*
+		 * Read charger type to check cable type and decide cable state
+		 * according to type of charger cable.
+		 */
+		chg_type = info->status[1] & STATUS2_CHGTYP_MASK;
+		chg_type >>= STATUS2_CHGTYP_SHIFT;
 
-		/* Check GROUND accessory with charger cable */
-		if (adc == MAX77833_MUIC_ADC_GROUND) {
-			if (chg_type == MAX77833_MUIC_CHG_NONE) {
-				/*
-				 * The following state when charger cable is
-				 * disconnected but the GROUND accessory still
-				 * connected.
-				 */
-				*attached = false;
-				cable_type = info->prev_chg_type;
-				info->prev_chg_type = MAX77833_MUIC_CHG_NONE;
-			} else {
-
-				/*
-				 * The following state when charger cable is
-				 * connected on the GROUND accessory.
-				 */
-				*attached = true;
-				cable_type = MAX77833_MUIC_CHG_GND;
-				info->prev_chg_type = MAX77833_MUIC_CHG_GND;
-			}
-			break;
-		}
-
-		if (adc == MAX77833_MUIC_ADC_RESERVED_ACC_3) { /* SmartDock */
-			if (chg_type == MAX77833_MUIC_CHG_NONE) {
-				*attached = false;
-				cable_type = info->prev_chg_type;
-				info->prev_chg_type = MAX77833_MUIC_CHG_NONE;
-			} else {
-				*attached = true;
-				cable_type = MAX77833_MUIC_CHG_DOCK;
-				info->prev_chg_type = MAX77833_MUIC_CHG_DOCK;
-			}
-			break;
-		}
-
-		if (chg_type == MAX77833_MUIC_CHG_NONE) {
+		if (chg_type == MAX8997_CHARGER_TYPE_NONE) {
 			*attached = false;
+
 			cable_type = info->prev_chg_type;
-			info->prev_chg_type = MAX77833_MUIC_CHG_NONE;
-		} else {
-			*attached = true;
-			cable_type = info->prev_chg_type = chg_type;
-		}
-		break;
-	case MAX77833_CABLE_GROUP_ADC_GND:
-		if (adc == MAX77833_MUIC_ADC_OPEN) {
-			*attached = false;
-			cable_type = info->prev_gnd_type;
-			info->prev_gnd_type = MAX77833_MUIC_ADC_OPEN;
+			info->prev_chg_type = MAX8997_CHARGER_TYPE_NONE;
 		} else {
 			*attached = true;
 
 			/*
-			 * Offset|ADC1K|VBVolt|
-			 *    0x1|    0|     0| USB-HOST
-			 *    0x1|    0|     1| USB-HOST with VB
-			 *    0x1|    1|     0| MHL
-			 *    0x1|    1|     1| MHL with VB
+			 * Check current cable state/cable type and store cable
+			 * type(info->prev_chg_type) for handling cable when
+			 * charger cable is detached.
 			 */
-			/* Get ADC1K register bit */
-			gnd_type = (info->status[MAX77833_MUIC_STATUS1] &
-					MAX77833_MUIC_STATUS1_ADC1K_MASK);
-
-			/* Get VBVolt register bit */
-			gnd_type |= (info->status[MAX77833_MUIC_STATUS2] &
-					MAX77833_MUIC_STATUS2_VBVOLT_MASK);
-			gnd_type >>= MAX77833_MUIC_STATUS2_VBVOLT_SHIFT;
-
-			/* Offset of GND cable */
-			gnd_type |= MAX77833_MUIC_GND_USB_HOST;
-			cable_type = info->prev_gnd_type = gnd_type;
+			cable_type = info->prev_chg_type = chg_type;
 		}
+
 		break;
 	default:
 		dev_err(info->dev, "Unknown cable group (%d)\n", group);
@@ -366,162 +306,148 @@ static int max77833_muic_get_cable_type(struct max77833_muic_info *info,
 	return cable_type;
 }
 
-static int max77833_muic_adc_gnd_handler(struct max77833_muic_info *info)
+static int max8997_muic_handle_usb(struct max8997_muic_info *info,
+			enum max8997_muic_usb_type usb_type, bool attached)
 {
-	int ret, gnd_cable_type;
-	bool attached;
+	int ret = 0;
 
-	gnd_cable_type = max77833_muic_get_cable_type(info,
-			MAX77833_CABLE_GROUP_ADC_GND, &attached);
-	dev_dbg(info->dev, "external connector is %s (gnd:0x%02x)\n",
-			attached ? "attached" : "detached", gnd_cable_type);
+	ret = max8997_muic_set_path(info, info->path_usb, attached);
+	if (ret < 0) {
+		dev_err(info->dev, "failed to update muic register\n");
+		return ret;
+	}
 
-	switch (gnd_cable_type) {
-	case MAX77833_MUIC_GND_USB_HOST:
-	case MAX77833_MUIC_GND_USB_HOST_VB:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_USB,
-					     attached, false);
-		if (ret < 0)
-			return ret;
-
+	switch (usb_type) {
+	case MAX8997_USB_HOST:
 		extcon_set_state_sync(info->edev, EXTCON_USB_HOST, attached);
-		max77833_charger_set_otg_vbus(info, attached);
 		break;
-	case MAX77833_MUIC_GND_MHL_VB:
-	case MAX77833_MUIC_GND_MHL:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_OPEN,
-					     attached, false);
-		if (ret < 0)
-			return ret;
-
-		extcon_set_state_sync(info->edev, EXTCON_DISP_MHL, attached);
+	case MAX8997_USB_DEVICE:
+		extcon_set_state_sync(info->edev, EXTCON_USB, attached);
+		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_SDP,
+					attached);
 		break;
 	default:
-		dev_err(info->dev, "failed to detect %s accessory(gnd:0x%x)\n",
-			attached ? "attached" : "detached", gnd_cable_type);
+		dev_err(info->dev, "failed to detect %s usb cable\n",
+			attached ? "attached" : "detached");
 		return -EINVAL;
 	}
 
 	return 0;
 }
 
-static int max77833_muic_jig_handler(struct max77833_muic_info *info,
-		int cable_type, bool attached)
+static int max8997_muic_handle_dock(struct max8997_muic_info *info,
+			int cable_type, bool attached)
 {
-	int ret;
-	u8 path = MAX77833_MUIC_CONTROL1_SW_OPEN;
+	int ret = 0;
 
-	dev_dbg(info->dev, "external connector is %s (adc:0x%02x)\n",
-			attached ? "attached" : "detached", cable_type);
+	ret = max8997_muic_set_path(info, CONTROL1_SW_AUDIO, attached);
+	if (ret) {
+		dev_err(info->dev, "failed to update muic register\n");
+		return ret;
+	}
 
 	switch (cable_type) {
-	case MAX77833_MUIC_ADC_FACTORY_MODE_USB_OFF:
-	case MAX77833_MUIC_ADC_FACTORY_MODE_USB_ON:
-		path = MAX77833_MUIC_CONTROL1_SW_USB;
-		break;
-	case MAX77833_MUIC_ADC_FACTORY_MODE_UART_OFF:
-		path = MAX77833_MUIC_CONTROL1_SW_UART;
+	case MAX8997_MUIC_ADC_AV_CABLE_NOLOAD:
+	case MAX8997_MUIC_ADC_FACTORY_MODE_UART_ON:
+		extcon_set_state_sync(info->edev, EXTCON_DOCK, attached);
 		break;
 	default:
+		dev_err(info->dev, "failed to detect %s dock device\n",
+			attached ? "attached" : "detached");
 		return -EINVAL;
 	}
 
-	ret = max77833_muic_set_path(info, path, attached, false);
-	if (ret < 0)
+	return 0;
+}
+
+static int max8997_muic_handle_jig_uart(struct max8997_muic_info *info,
+			bool attached)
+{
+	int ret = 0;
+
+	/* switch to UART */
+	ret = max8997_muic_set_path(info, info->path_uart, attached);
+	if (ret) {
+		dev_err(info->dev, "failed to update muic register\n");
 		return ret;
+	}
 
 	extcon_set_state_sync(info->edev, EXTCON_JIG, attached);
 
 	return 0;
 }
 
-static int max77833_muic_dock_handler(struct max77833_muic_info *info,
-		bool attached)
+static int max8997_muic_adc_handler(struct max8997_muic_info *info)
 {
-	int ret;
-
-	dev_dbg(info->dev, "external connector is %s (adc: 0x10)\n",
-			attached ? "attached" : "detached");
-
-	ret = max77833_muic_set_path(info, MAX77833_MUIC_CONTROL1_SW_USB,
-				     attached, attached);
-	if (ret < 0)
-		return ret;
-
-	extcon_set_state_sync(info->edev, EXTCON_DISP_MHL, attached);
-	extcon_set_state_sync(info->edev, EXTCON_USB_HOST, attached);
-	extcon_set_state_sync(info->edev, EXTCON_DOCK, attached);
-
-	return 0;
-}
-
-static int max77833_muic_adc_handler(struct max77833_muic_info *info)
-{
-	int ret, cable_type;
+	int cable_type;
 	bool attached;
+	int ret = 0;
 
-	cable_type = max77833_muic_get_cable_type(info,
-			MAX77833_CABLE_GROUP_ADC, &attached);
-
-	dev_dbg(info->dev,
-		"external connector is %s (adc:0x%02x, prev_adc:0x%x)\n",
-		attached ? "attached" : "detached", cable_type,
-		info->prev_cable_type);
+	/* Check cable state which is either detached or attached */
+	cable_type = max8997_muic_get_cable_type(info,
+				MAX8997_CABLE_GROUP_ADC, &attached);
 
 	switch (cable_type) {
-	case MAX77833_MUIC_ADC_RESERVED_ACC_3: /* SmartDock */
-		ret = max77833_muic_dock_handler(info, attached);
+	case MAX8997_MUIC_ADC_GROUND:
+		ret = max8997_muic_handle_usb(info, MAX8997_USB_HOST, attached);
 		if (ret < 0)
 			return ret;
 		break;
-	case MAX77833_MUIC_ADC_GROUND:
-		ret = max77833_muic_adc_gnd_handler(info);
+	case MAX8997_MUIC_ADC_MHL:
+		extcon_set_state_sync(info->edev, EXTCON_DISP_MHL, attached);
+		break;
+	case MAX8997_MUIC_ADC_FACTORY_MODE_USB_OFF:
+	case MAX8997_MUIC_ADC_FACTORY_MODE_USB_ON:
+		ret = max8997_muic_handle_usb(info,
+					     MAX8997_USB_DEVICE, attached);
 		if (ret < 0)
 			return ret;
 		break;
-	case MAX77833_MUIC_ADC_FACTORY_MODE_USB_OFF:
-	case MAX77833_MUIC_ADC_FACTORY_MODE_USB_ON:
-	case MAX77833_MUIC_ADC_FACTORY_MODE_UART_OFF:
-		ret = max77833_muic_jig_handler(info, cable_type, attached);
+	case MAX8997_MUIC_ADC_AV_CABLE_NOLOAD:
+	case MAX8997_MUIC_ADC_FACTORY_MODE_UART_ON:
+		ret = max8997_muic_handle_dock(info, cable_type, attached);
 		if (ret < 0)
 			return ret;
 		break;
-	case MAX77833_MUIC_ADC_SEND_END_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S1_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S2_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S3_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S4_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S5_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S6_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S7_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S8_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S9_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S10_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S11_BUTTON:
-	case MAX77833_MUIC_ADC_REMOTE_S12_BUTTON:
-	case MAX77833_MUIC_ADC_RESERVED_ACC_1:
-	case MAX77833_MUIC_ADC_RESERVED_ACC_2:
-	case MAX77833_MUIC_ADC_RESERVED_ACC_4:
-	case MAX77833_MUIC_ADC_RESERVED_ACC_5:
-	case MAX77833_MUIC_ADC_AUDIO_DEVICE_TYPE2:
-	case MAX77833_MUIC_ADC_PHONE_POWERED_DEV:
-	case MAX77833_MUIC_ADC_TTY_CONVERTER:
-	case MAX77833_MUIC_ADC_UART_CABLE:
-	case MAX77833_MUIC_ADC_CEA936A_TYPE1_CHG:
-	case MAX77833_MUIC_ADC_AV_CABLE_NOLOAD:
-	case MAX77833_MUIC_ADC_CEA936A_TYPE2_CHG:
-	case MAX77833_MUIC_ADC_FACTORY_MODE_UART_ON:
-	case MAX77833_MUIC_ADC_AUDIO_DEVICE_TYPE1:
-	case MAX77833_MUIC_ADC_OPEN:
-		dev_err(info->dev,
-			"accessory is %s but it isn't used (adc:0x%x)\n",
+	case MAX8997_MUIC_ADC_FACTORY_MODE_UART_OFF:
+		ret = max8997_muic_handle_jig_uart(info, attached);
+		break;
+	case MAX8997_MUIC_ADC_REMOTE_S1_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S2_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S3_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S4_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S5_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S6_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S7_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S8_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S9_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S10_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S11_BUTTON:
+	case MAX8997_MUIC_ADC_REMOTE_S12_BUTTON:
+	case MAX8997_MUIC_ADC_RESERVED_ACC_1:
+	case MAX8997_MUIC_ADC_RESERVED_ACC_2:
+	case MAX8997_MUIC_ADC_RESERVED_ACC_3:
+	case MAX8997_MUIC_ADC_RESERVED_ACC_4:
+	case MAX8997_MUIC_ADC_RESERVED_ACC_5:
+	case MAX8997_MUIC_ADC_CEA936_AUDIO:
+	case MAX8997_MUIC_ADC_PHONE_POWERED_DEV:
+	case MAX8997_MUIC_ADC_TTY_CONVERTER:
+	case MAX8997_MUIC_ADC_UART_CABLE:
+	case MAX8997_MUIC_ADC_CEA936A_TYPE1_CHG:
+	case MAX8997_MUIC_ADC_CEA936A_TYPE2_CHG:
+	case MAX8997_MUIC_ADC_AUDIO_MODE_REMOTE:
+		/*
+		 * This cable isn't used in general case if it is specially
+		 * needed to detect additional cable, should implement
+		 * proper operation when this cable is attached/detached.
+		 */
+		dev_info(info->dev,
+			"cable is %s but it isn't used (type:0x%x)\n",
 			attached ? "attached" : "detached", cable_type);
 		return -EAGAIN;
 	default:
 		dev_err(info->dev,
-			"failed to detect %s accessory (adc:0x%x)\n",
+			"failed to detect %s unknown cable (type:0x%x)\n",
 			attached ? "attached" : "detached", cable_type);
 		return -EINVAL;
 	}
@@ -529,439 +455,332 @@ static int max77833_muic_adc_handler(struct max77833_muic_info *info)
 	return 0;
 }
 
-static int max77833_muic_chg_handler(struct max77833_muic_info *info)
+static int max8997_muic_chg_handler(struct max8997_muic_info *info)
 {
-	int ret, chg_type, gnd_type;
+	int chg_type;
 	bool attached;
+	int adc;
 
-	chg_type = max77833_muic_get_cable_type(info,
-			MAX77833_CABLE_GROUP_CHG, &attached);
-
-	dev_dbg(info->dev,
-		"external connector is %s(chg_type:0x%x, prev_chg_type:0x%x)\n",
-		attached ? "attached" : "detached",
-		chg_type, info->prev_chg_type);
+	chg_type = max8997_muic_get_cable_type(info,
+				MAX8997_CABLE_GROUP_CHG, &attached);
 
 	switch (chg_type) {
-	case MAX77833_MUIC_CHG_USB:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_USB,
-					     attached, false);
-		if (ret < 0)
-			return ret;
-
-		extcon_set_state_sync(info->edev, EXTCON_USB, attached);
-		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_SDP,
-					attached);
+	case MAX8997_CHARGER_TYPE_NONE:
 		break;
-	case MAX77833_MUIC_CHG_DOWNSTREAM:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_OPEN,
-					     attached, false);
-		if (ret < 0)
-			return ret;
+	case MAX8997_CHARGER_TYPE_USB:
+		adc = info->status[0] & STATUS1_ADC_MASK;
+		adc >>= STATUS1_ADC_SHIFT;
 
+		if ((adc & STATUS1_ADC_MASK) == MAX8997_MUIC_ADC_OPEN) {
+			max8997_muic_handle_usb(info,
+					MAX8997_USB_DEVICE, attached);
+		}
+		break;
+	case MAX8997_CHARGER_TYPE_DOWNSTREAM_PORT:
 		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_CDP,
 					attached);
 		break;
-	case MAX77833_MUIC_CHG_DEDICATED:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_OPEN,
-					     attached, false);
-		if (ret < 0)
-			return ret;
-
+	case MAX8997_CHARGER_TYPE_DEDICATED_CHG:
 		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_DCP,
 					attached);
 		break;
-	case MAX77833_MUIC_CHG_SPECIAL_500MA:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_OPEN,
-					     attached, false);
-		if (ret < 0)
-			return ret;
-
+	case MAX8997_CHARGER_TYPE_500MA:
 		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_SLOW,
 					attached);
 		break;
-	case MAX77833_MUIC_CHG_SPECIAL_1A:
-		ret = max77833_muic_set_path(info,
-					     MAX77833_MUIC_CONTROL1_SW_OPEN,
-					     attached, false);
-		if (ret < 0)
-			return ret;
-
+	case MAX8997_CHARGER_TYPE_1A:
 		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_FAST,
 					attached);
 		break;
-	case MAX77833_MUIC_CHG_GND:
-		gnd_type = max77833_muic_get_cable_type(info,
-				MAX77833_CABLE_GROUP_ADC_GND, &attached);
-
-		/* Charger cable on MHL accessory is attach or detach */
-		if (gnd_type == MAX77833_MUIC_GND_MHL_VB)
-			extcon_set_state_sync(info->edev, EXTCON_CHG_USB_DCP,
-						true);
-		else if (gnd_type == MAX77833_MUIC_GND_MHL)
-			extcon_set_state_sync(info->edev, EXTCON_CHG_USB_DCP,
-						false);
-		break;
-	case MAX77833_MUIC_CHG_DOCK:
-		extcon_set_state_sync(info->edev, EXTCON_CHG_USB_DCP, attached);
-		break;
-	case MAX77833_MUIC_CHG_NONE:
-		break;
 	default:
 		dev_err(info->dev,
-			"failed to detect %s accessory (chg_type:0x%x)\n",
+			"failed to detect %s unknown chg cable (type:0x%x)\n",
 			attached ? "attached" : "detached", chg_type);
-
-		max77833_muic_set_path(info, MAX77833_MUIC_CONTROL1_SW_OPEN,
-				       attached, false);
 		return -EINVAL;
 	}
 
 	return 0;
 }
 
-static void max77833_muic_irq_work(struct work_struct *work)
+static void max8997_muic_irq_work(struct work_struct *work)
 {
-	struct max77833_muic_info *info = container_of(work,
-			struct max77833_muic_info, irq_work);
-	struct max77693_dev *max77833 = info->max77833;
-	int ret = 0;
+	struct max8997_muic_info *info = container_of(work,
+			struct max8997_muic_info, irq_work);
+	int irq_type = 0;
+	int i, ret;
+
+	if (!info->edev)
+		return;
 
 	mutex_lock(&info->mutex);
 
-	ret = regmap_bulk_read(max77833->regmap_muic,
-			MAX77833_MUIC_REG_STATUS1, info->status,
-			MAX77833_MUIC_STATUS_NUM);
+	for (i = 0; i < ARRAY_SIZE(muic_irqs); i++)
+		if (info->irq == muic_irqs[i].virq)
+			irq_type = muic_irqs[i].irq;
+
+	ret = max8997_bulk_read(info->muic, MAX8997_MUIC_REG_STATUS1,
+				2, info->status);
 	if (ret) {
-		dev_err(info->dev, "Cannot read STATUS registers\n");
+		dev_err(info->dev, "failed to read muic register\n");
 		mutex_unlock(&info->mutex);
 		return;
 	}
 
-	if (info->irq_adc) {
-		ret = max77833_muic_adc_handler(info);
-		if (ret)
-			dev_err(info->dev, "Unknown cable type\n");
-		info->irq_adc = false;
+	switch (irq_type) {
+	case MAX8997_MUICIRQ_ADCError:
+	case MAX8997_MUICIRQ_ADCLow:
+	case MAX8997_MUICIRQ_ADC:
+		/* Handle all of cable except for charger cable */
+		ret = max8997_muic_adc_handler(info);
+		break;
+	case MAX8997_MUICIRQ_VBVolt:
+	case MAX8997_MUICIRQ_DBChg:
+	case MAX8997_MUICIRQ_DCDTmr:
+	case MAX8997_MUICIRQ_ChgDetRun:
+	case MAX8997_MUICIRQ_ChgTyp:
+		/* Handle charger cable */
+		ret = max8997_muic_chg_handler(info);
+		break;
+	case MAX8997_MUICIRQ_OVP:
+		break;
+	default:
+		dev_info(info->dev, "misc interrupt: irq %d occurred\n",
+				irq_type);
+		mutex_unlock(&info->mutex);
+		return;
 	}
 
-	if (info->irq_chg) {
-		ret = max77833_muic_chg_handler(info);
-		if (ret)
-			dev_err(info->dev, "Unknown charger type\n");
-		info->irq_chg = false;
-	}
+	if (ret < 0)
+		dev_err(info->dev, "failed to handle MUIC interrupt\n");
 
 	mutex_unlock(&info->mutex);
 }
 
-static irqreturn_t max77833_muic_irq_handler(int irq, void *data)
+static irqreturn_t max8997_muic_irq_handler(int irq, void *data)
 {
-	struct max77833_muic_info *info = data;
-	int i, irq_type = -1;
+	struct max8997_muic_info *info = data;
 
-	for (i = 0; i < ARRAY_SIZE(max77833_muic_irqs); i++)
-		if (irq == max77833_muic_irqs[i].virq)
-			irq_type = max77833_muic_irqs[i].irq;
-
-	switch (irq_type) {
-	case MAX77833_MUIC_IRQ_INT1_ADC:
-	case MAX77833_MUIC_IRQ_INT1_ADCERROR:
-	case MAX77833_MUIC_IRQ_INT1_ADC1K:
-		info->irq_adc = true;
-		break;
-	case MAX77833_MUIC_IRQ_INT2_CHGTYP:
-	case MAX77833_MUIC_IRQ_INT2_CHGDETRUN:
-	case MAX77833_MUIC_IRQ_INT2_DCDTMR:
-	case MAX77833_MUIC_IRQ_INT2_DXOVP:
-	case MAX77833_MUIC_IRQ_INT2_VBVOLT:
-		info->irq_chg = true;
-		break;
-	case MAX77833_MUIC_IRQ_INT3_VBADC:
-	case MAX77833_MUIC_IRQ_INT3_VDNMON:
-	case MAX77833_MUIC_IRQ_INT3_DNRES:
-	case MAX77833_MUIC_IRQ_INT3_MPNACK:
-	case MAX77833_MUIC_IRQ_INT3_MRXBUFOW:
-	case MAX77833_MUIC_IRQ_INT3_MRXTRF:
-	case MAX77833_MUIC_IRQ_INT3_MRXPERR:
-	case MAX77833_MUIC_IRQ_INT3_MRXRDY:
-		break;
-	default:
-		dev_err(info->dev, "Cannot recognize IRQ(%d)\n", irq_type);
-		break;
-	}
+	dev_dbg(info->dev, "irq:%d\n", irq);
+	info->irq = irq;
 
 	schedule_work(&info->irq_work);
 
 	return IRQ_HANDLED;
 }
 
-static void max77833_muic_detect_cable_wq(struct work_struct *work)
+static int max8997_muic_detect_dev(struct max8997_muic_info *info)
 {
-	struct max77833_muic_info *info = container_of(to_delayed_work(work),
-			struct max77833_muic_info, wq_detcable);
-	struct max77693_dev *max77833 = info->max77833;
-	int chg_type, adc, ret;
+	int ret = 0;
+	int adc;
+	int chg_type;
 	bool attached;
 
 	mutex_lock(&info->mutex);
 
-	ret = regmap_bulk_read(max77833->regmap_muic,
-			MAX77833_MUIC_REG_STATUS1, info->status,
-			MAX77833_MUIC_STATUS_NUM);
+	/* Read STATUSx register to detect accessory */
+	ret = max8997_bulk_read(info->muic,
+			MAX8997_MUIC_REG_STATUS1, 2, info->status);
 	if (ret) {
-		dev_err(info->dev, "Cannot read STATUS registers\n");
-		goto err_cable_wq;
+		dev_err(info->dev, "failed to read MUIC register\n");
+		mutex_unlock(&info->mutex);
+		return ret;
 	}
 
-	adc = max77833_muic_get_cable_type(info,
-			MAX77833_CABLE_GROUP_ADC, &attached);
-	if (attached && adc != MAX77833_MUIC_ADC_OPEN) {
-		ret = max77833_muic_adc_handler(info);
+	adc = max8997_muic_get_cable_type(info, MAX8997_CABLE_GROUP_ADC,
+					&attached);
+	if (attached && adc != MAX8997_MUIC_ADC_OPEN) {
+		ret = max8997_muic_adc_handler(info);
 		if (ret < 0) {
-			dev_err(info->dev, "Cannot detect accessory\n");
-			goto err_cable_wq;
-		}
-	}
-
-	chg_type = max77833_muic_get_cable_type(info,
-			MAX77833_CABLE_GROUP_CHG, &attached);
-	if (attached && chg_type != MAX77833_MUIC_CHG_NONE) {
-		ret = max77833_muic_chg_handler(info);
-		if (ret < 0) {
-			dev_err(info->dev, "Cannot detect charger accessory\n");
-			goto err_cable_wq;
-		}
-	}
-
-err_cable_wq:
-	mutex_unlock(&info->mutex);
-}
-
-static int max77833_muic_set_debounce_time(struct max77833_muic_info *info,
-		enum max77833_muic_adc_debounce_time time)
-{
-	struct max77693_dev *max77833 = info->max77833;
-	int ret;
-
-	switch (time) {
-	case MAX77833_DEBOUNCE_TIME_5MS:
-	case MAX77833_DEBOUNCE_TIME_10MS:
-	case MAX77833_DEBOUNCE_TIME_25MS:
-	case MAX77833_DEBOUNCE_TIME_38_62MS:
-		ret = regmap_update_bits(max77833->regmap_muic,
-				MAX77833_MUIC_REG_CONTROL4,
-				MAX77833_MUIC_CONTROL4_ADCDBSET_MASK,
-				time << MAX77833_MUIC_CONTROL4_ADCDBSET_SHIFT);
-		if (ret < 0) {
-			dev_err(info->dev, "Cannot write MUIC regmap\n");
+			dev_err(info->dev, "Cannot detect ADC cable\n");
+			mutex_unlock(&info->mutex);
 			return ret;
 		}
-		break;
-	default:
-		dev_err(info->dev, "Invalid ADC debounce time\n");
-		return -EINVAL;
 	}
+
+	chg_type = max8997_muic_get_cable_type(info, MAX8997_CABLE_GROUP_CHG,
+					&attached);
+	if (attached && chg_type != MAX8997_CHARGER_TYPE_NONE) {
+		ret = max8997_muic_chg_handler(info);
+		if (ret < 0) {
+			dev_err(info->dev, "Cannot detect charger cable\n");
+			mutex_unlock(&info->mutex);
+			return ret;
+		}
+	}
+
+	mutex_unlock(&info->mutex);
 
 	return 0;
 }
 
-static int max77833_init_muic_regmap(struct max77693_dev *max77833)
+static void max8997_muic_detect_cable_wq(struct work_struct *work)
 {
+	struct max8997_muic_info *info = container_of(to_delayed_work(work),
+				struct max8997_muic_info, wq_detcable);
 	int ret;
 
-	max77833->i2c_muic = i2c_new_dummy(max77833->i2c->adapter,
-			I2C_ADDR_MUIC);
-	if (!max77833->i2c_muic) {
-		dev_err(&max77833->i2c->dev,
-				"Cannot allocate I2C device for MUIC\n");
-		return -ENOMEM;
-	}
-
-	i2c_set_clientdata(max77833->i2c_muic, max77833);
-
-	max77833->regmap_muic = devm_regmap_init_i2c(max77833->i2c_muic,
-			&max77833_muic_regmap_config);
-	if (IS_ERR(max77833->regmap_muic)) {
-		ret = PTR_ERR(max77833->regmap_muic);
-		goto err_muic_i2c;
-	}
-
-	ret = regmap_add_irq_chip(max77833->regmap_muic, max77833->irq,
-			IRQF_TRIGGER_LOW | IRQF_ONESHOT | IRQF_SHARED,
-			0, &max77833_muic_irq_chip, &max77833->irq_data_muic);
-	if (ret < 0) {
-		dev_err(&max77833->i2c->dev, "Cannot add MUIC IRQ chip\n");
-		goto err_muic_i2c;
-	}
-
-	return 0;
-
-err_muic_i2c:
-	i2c_unregister_device(max77833->i2c_muic);
-
-	return ret;
+	ret = max8997_muic_detect_dev(info);
+	if (ret < 0)
+		dev_err(info->dev, "failed to detect cable type\n");
 }
 
-static int max77833_muic_probe(struct platform_device *pdev)
+static int max8997_muic_probe(struct platform_device *pdev)
 {
-	struct max77693_dev *max77833 = dev_get_drvdata(pdev->dev.parent);
-	struct max77833_muic_info *info;
-	unsigned int id;
+	struct max8997_dev *max8997 = dev_get_drvdata(pdev->dev.parent);
+	struct max8997_platform_data *pdata = dev_get_platdata(max8997->dev);
+	struct max8997_muic_info *info;
+	int delay_jiffies;
 	int cable_type;
 	bool attached;
-	int i, ret;
+	int ret, i;
 
-	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
+	info = devm_kzalloc(&pdev->dev, sizeof(struct max8997_muic_info),
+			    GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
 	info->dev = &pdev->dev;
-	info->max77833 = max77833;
+	info->muic = max8997->muic;
 
 	platform_set_drvdata(pdev, info);
 	mutex_init(&info->mutex);
 
-	/* Initialize i2c and regmap */
-	ret = max77833_init_muic_regmap(max77833);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to init MUIC regmap\n");
-		return ret;
+	INIT_WORK(&info->irq_work, max8997_muic_irq_work);
+
+	for (i = 0; i < ARRAY_SIZE(muic_irqs); i++) {
+		struct max8997_muic_irq *muic_irq = &muic_irqs[i];
+		unsigned int virq = 0;
+
+		virq = irq_create_mapping(max8997->irq_domain, muic_irq->irq);
+		if (!virq) {
+			ret = -EINVAL;
+			goto err_irq;
+		}
+		muic_irq->virq = virq;
+
+		ret = request_threaded_irq(virq, NULL,
+				max8997_muic_irq_handler,
+				IRQF_NO_SUSPEND,
+				muic_irq->name, info);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"failed: irq request (IRQ: %d, error :%d)\n",
+				muic_irq->irq, ret);
+			goto err_irq;
+		}
 	}
 
-	/* Turn off auto detection configuration */
-	ret = regmap_update_bits(max77833->regmap_muic,
-			MAX77833_MUIC_REG_CONTROL4,
-			MAX77833_MUIC_CONTROL4_USBAUTO_MASK |
-			MAX77833_MUIC_CONTROL4_FCTAUTO_MASK,
-			CONTROL4_AUTO_DISABLE);
-
-	/* Initialize extcon device */
-	info->edev = devm_extcon_dev_allocate(&pdev->dev,
-			max77833_extcon_cable);
+	/* External connector */
+	info->edev = devm_extcon_dev_allocate(&pdev->dev, max8997_extcon_cable);
 	if (IS_ERR(info->edev)) {
-		dev_err(&pdev->dev, "Failed to allocate memory for extcon\n");
-		ret = -ENODEV;
-		goto err_muic_irq;
+		dev_err(&pdev->dev, "failed to allocate memory for extcon\n");
+		ret = -ENOMEM;
+		goto err_irq;
 	}
 
 	ret = devm_extcon_dev_register(&pdev->dev, info->edev);
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to register extcon device\n");
-		goto err_muic_irq;
+		dev_err(&pdev->dev, "failed to register extcon device\n");
+		goto err_irq;
 	}
 
-	/* Set ADC debounce time */
-	max77833_muic_set_debounce_time(info, MAX77833_DEBOUNCE_TIME_25MS);
+	if (pdata && pdata->muic_pdata) {
+		struct max8997_muic_platform_data *muic_pdata
+			= pdata->muic_pdata;
+
+		/* Initialize registers according to platform data */
+		for (i = 0; i < muic_pdata->num_init_data; i++) {
+			max8997_write_reg(info->muic,
+					muic_pdata->init_data[i].addr,
+					muic_pdata->init_data[i].data);
+		}
+
+		/*
+		 * Default usb/uart path whether UART/USB or AUX_UART/AUX_USB
+		 * h/w path of COMP2/COMN1 on CONTROL1 register.
+		 */
+		if (muic_pdata->path_uart)
+			info->path_uart = muic_pdata->path_uart;
+		else
+			info->path_uart = CONTROL1_SW_UART;
+
+		if (muic_pdata->path_usb)
+			info->path_usb = muic_pdata->path_usb;
+		else
+			info->path_usb = CONTROL1_SW_USB;
+
+		/*
+		 * Default delay time for detecting cable state
+		 * after certain time.
+		 */
+		if (muic_pdata->detcable_delay_ms)
+			delay_jiffies =
+				msecs_to_jiffies(muic_pdata->detcable_delay_ms);
+		else
+			delay_jiffies = msecs_to_jiffies(DELAY_MS_DEFAULT);
+	} else {
+		info->path_uart = CONTROL1_SW_UART;
+		info->path_usb = CONTROL1_SW_USB;
+		delay_jiffies = msecs_to_jiffies(DELAY_MS_DEFAULT);
+	}
 
 	/* Set initial path for UART when JIG is connected to get serial logs */
-	ret = regmap_bulk_read(max77833->regmap_muic,
-			MAX77833_MUIC_REG_STATUS1, info->status,
-			MAX77833_MUIC_STATUS_NUM);
+	ret = max8997_bulk_read(info->muic, MAX8997_MUIC_REG_STATUS1,
+				2, info->status);
 	if (ret) {
-		dev_err(info->dev, "Cannot read STATUS registers\n");
-		goto err_muic_irq;
+		dev_err(info->dev, "failed to read MUIC register\n");
+		return ret;
 	}
-	cable_type = max77833_muic_get_cable_type(info, MAX77833_CABLE_GROUP_ADC,
-					 &attached);
-	if (attached && cable_type == MAX77833_MUIC_ADC_FACTORY_MODE_UART_OFF)
-		max77833_muic_set_path(info, MAX77833_MUIC_CONTROL1_SW_UART,
-				       true, false);
+	cable_type = max8997_muic_get_cable_type(info,
+					   MAX8997_CABLE_GROUP_ADC, &attached);
+	if (attached && cable_type == MAX8997_MUIC_ADC_FACTORY_MODE_UART_OFF)
+		max8997_muic_set_path(info, info->path_uart, true);
 
-	/* Check revision number of MUIC device */
-	ret = regmap_read(max77833->regmap_muic, MAX77833_MUIC_REG_ID, &id);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "Failed to read revision number\n");
-		goto err_muic_irq;
-	}
-	dev_info(info->dev, "MUIC device ID : 0x%x\n", id);
+	/* Set ADC debounce time */
+	max8997_muic_set_debounce_time(info, ADC_DEBOUNCE_TIME_25MS);
 
-	/* Support virtual irq domain for max77833 MUIC device */
-	INIT_WORK(&info->irq_work, max77833_muic_irq_work);
-
-	/* Clear IRQ bits before request IRQs */
-	ret = regmap_bulk_read(max77833->regmap_muic,
-			MAX77833_MUIC_REG_INT1, info->status,
-			MAX77833_MUIC_STATUS_NUM);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to Clear IRQ bits\n");
-		goto err_muic_irq;
-	}
-
-	for (i = 0; i < ARRAY_SIZE(max77833_muic_irqs); i++) {
-		struct max77833_muic_irq *muic_irq = &max77833_muic_irqs[i];
-		int virq = 0;
-
-		virq = regmap_irq_get_virq(max77833->irq_data_muic,
-				muic_irq->irq);
-		if (virq <= 0) {
-			ret = -EINVAL;
-			goto err_muic_irq;
-		}
-		muic_irq->virq = virq;
-
-		ret = devm_request_threaded_irq(&pdev->dev, virq, NULL,
-				max77833_muic_irq_handler, IRQF_NO_SUSPEND,
-				muic_irq->name, info);
-		if (ret) {
-			dev_err(&pdev->dev,
-				"Failed to request irq (IRQ: %d, error: %d)\n",
-				muic_irq->irq, ret);
-			goto err_muic_irq;
-		}
-	}
-
-	/* Detect accessory after completing the initialization of platform */
-	INIT_DELAYED_WORK(&info->wq_detcable, max77833_muic_detect_cable_wq);
-	queue_delayed_work(system_power_efficient_wq,
-			&info->wq_detcable, msecs_to_jiffies(DELAY_MS_DEFAULT));
+	/*
+	 * Detect accessory after completing the initialization of platform
+	 *
+	 * - Use delayed workqueue to detect cable state and then
+	 * notify cable state to notifiee/platform through uevent.
+	 * After completing the booting of platform, the extcon provider
+	 * driver should notify cable state to upper layer.
+	 */
+	INIT_DELAYED_WORK(&info->wq_detcable, max8997_muic_detect_cable_wq);
+	queue_delayed_work(system_power_efficient_wq, &info->wq_detcable,
+			delay_jiffies);
 
 	return 0;
 
-err_muic_irq:
-	regmap_del_irq_chip(max77833->irq, max77833->irq_data_muic);
-	i2c_unregister_device(max77833->i2c_muic);
-
+err_irq:
+	while (--i >= 0)
+		free_irq(muic_irqs[i].virq, info);
 	return ret;
 }
 
-static int max77833_muic_remove(struct platform_device *pdev)
+static int max8997_muic_remove(struct platform_device *pdev)
 {
-	struct max77833_muic_info *info = platform_get_drvdata(pdev);
-	struct max77693_dev *max77833 = info->max77833;
+	struct max8997_muic_info *info = platform_get_drvdata(pdev);
+	int i;
 
+	for (i = 0; i < ARRAY_SIZE(muic_irqs); i++)
+		free_irq(muic_irqs[i].virq, info);
 	cancel_work_sync(&info->irq_work);
-	regmap_del_irq_chip(max77833->irq, max77833->irq_data_muic);
-	i2c_unregister_device(max77833->i2c_muic);
 
 	return 0;
 }
 
-static const struct platform_device_id max77833_muic_id[] = {
-	{ "max77833-muic", },
-	{ /* sentinel */ },
-};
-MODULE_DEVICE_TABLE(platform, max77833_muic_id);
-
-static struct platform_driver max77833_muic_driver = {
+static struct platform_driver max8997_muic_driver = {
 	.driver		= {
-		.name		= "max77833-muic",
+		.name	= DEV_NAME,
 	},
-	.probe		= max77833_muic_probe,
-	.remove		= max77833_muic_remove,
-	.id_table	= max77833_muic_id,
+	.probe		= max8997_muic_probe,
+	.remove		= max8997_muic_remove,
 };
 
-static int __init max77833_muic_init(void)
-{
-	return platform_driver_register(&max77833_muic_driver);
-}
-subsys_initcall(max77833_muic_init);
+module_platform_driver(max8997_muic_driver);
 
-MODULE_DESCRIPTION("Maxim MAX77833 Extcon driver");
-MODULE_AUTHOR("Jaewon Kim <jaewon02.kim@samsung.com> and Lucas Francesco <lucas.francesco93@gmail.com>");
+MODULE_DESCRIPTION("Maxim MAX8997 Extcon driver");
+MODULE_AUTHOR("Donggeun Kim <dg77.kim@samsung.com>");
 MODULE_LICENSE("GPL");
