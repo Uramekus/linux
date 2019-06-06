@@ -10,6 +10,11 @@ config EXYNOS_ARM64_COMMON_CLK
 	bool "Samsung Exynos ARMv8-family clock controller support" if COMPILE_TEST
 	depends on COMMON_CLK_SAMSUNG
 
+config EXYNOS_ARM64_7420
+	bool "Exynos 7420 specific clock controller support" if COMPILE_TEST
+	depends on EXYNOS_ARM64_COMMON_CLK
+
+
 config EXYNOS_AUDSS_CLK_CON
 	tristate "Samsung Exynos AUDSS clock controller support"
 	depends on COMMON_CLK_SAMSUNG
