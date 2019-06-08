@@ -34,7 +34,7 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/max77833.h>
 #include <linux/mfd/max77833-private.h>
-#include <linux/regulator/machine.h>
+//#include <linux/regulator/machine.h>
 
 
 //#include <linux/muic/muic.h> dead iface, use extcon and mfd
@@ -52,22 +52,22 @@ static const struct mfd_cell max77833_devs[] = {
 		.name = MUIC_DEV_NAME,
 	},{
 		.name = "max77833-safeout",
-		.of_compatible = "maxim,max77833-safeout'
+		.of_compatible = "maxim,max77833-safeout"
 	},{
 		.name = "max77833-fuelgauge",
-		.of_compatible = "maxim,max77833-fuelgauge'
+		.of_compatible = "maxim,max77833-fuelgauge"
 	},{
 		.name = "max77833-charger",
-		.of_compatible = "maxim,max77833-charger'
+		.of_compatible = "maxim,max77833-charger"
 	},{
 		.name = "max77833-haptic",
-		.of_compatible = "maxim,max77833-haptic'
+		.of_compatible = "maxim,max77833-haptic"
 	},{
 		.name = "leds-max77833-rgb",
-		.of_compatible = "maxim,max77833-rgb'
+		.of_compatible = "maxim,max77833-rgb"
 	},{
 		.name = "max77833-flash",
-		.of_compatible = "maxim,max77833-flash'
+		.of_compatible = "maxim,max77833-flash"
 	},
 };
 
