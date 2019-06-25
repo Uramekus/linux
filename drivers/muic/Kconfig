@@ -42,6 +42,13 @@ config MUIC_UNIVERSAL_MAX77854
 	help
 	  If you say yes here you will get support for the MAX77854 MUIC chip.
 
+config MUIC_UNIVERSAL_MAX77833
+	bool "MAX77833 MUIC"
+	depends on MFD_MAX77833 && MUIC_UNIVERSAL
+	default n
+	help
+	  If you say yes here you will get support for the MAX77833 MUIC chip.
+
 config MUIC_UNIVERSAL_MAX77865
 	bool "MAX77865 MUIC"
 	depends on MUIC_UNIVERSAL
@@ -69,6 +76,14 @@ config MUIC_HV_MAX77854
 	default n
 	help
 	  If you say yes here you will get support for the AFC.
+
+config MUIC_HV_MAX77833
+	bool "MUIC_HV_MAX77833"
+	depends on MUIC_UNIVERSAL_MAX77833
+	default n
+	help
+	  If you say yes here you will get support for the AFC.
+
 
 config MUIC_HV_MAX77865
 	bool "MUIC_HV_MAX77865"

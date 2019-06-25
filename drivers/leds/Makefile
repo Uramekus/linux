@@ -69,6 +69,7 @@ obj-$(CONFIG_LEDS_SEAD3)		+= leds-sead3.o
 obj-$(CONFIG_LEDS_S2MPB02)		+= leds-s2mpb02.o
 obj-$(CONFIG_LEDS_MAX77854_RGB)		+= leds-max77854-rgb.o
 obj-$(CONFIG_LEDS_MAX77865_RGB)		+= leds-max77865-rgb.o
+obj-$(CONFIG_LEDS_MAX77833_RGB)		+= leds-max77833-rgb.o
 
 # LED SPI Drivers
 obj-$(CONFIG_LEDS_DAC124S085)		+= leds-dac124s085.o

@@ -16,7 +16,7 @@ config MFD_CS5535
 	depends on PCI && (X86_32 || (X86 && COMPILE_TEST))
 	---help---
 	  This is the core driver for CS5535/CS5536 MFD functions.  This is
-          necessary for using the board's GPIO and MFGPT functionality.
+          necessary for using the boards GPIO and MFGPT functionality.
 
 config MFD_AS3711
 	bool "AMS AS3711"
@@ -589,6 +589,18 @@ config MFD_MAX77843
 	  This driver provides common support for accessing the device;
 	  additional drivers must be enabled in order to use the functionality
 	  of the device.
+
+config MFD_MAX77833
+	bool "Maxim Semiconductor MAX77833 PMIC Support"
+	depends on I2C=y && GENERIC_HARDIRQS
+	select MFD_CORE
+	help
+	 Say yes here to support for Maxim Semiconductor MAX77833.
+         This is a Power Management IC with LDO, RGB(SVC led), Haptic,
+         MUIC controls on chip.
+         This driver provides common support for accessing the device;
+         additional drivers
+
 
 config MFD_MAX77854
 	bool "Maxim Semiconductor MAX77854 PMIC Support"

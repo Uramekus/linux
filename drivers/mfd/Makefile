@@ -141,6 +141,7 @@ obj-$(CONFIG_MFD_MAX14577)	+= max14577.o
 obj-$(CONFIG_MFD_MAX77686)	+= max77686.o
 obj-$(CONFIG_MFD_MAX77693)	+= max77693.o
 obj-$(CONFIG_MFD_MAX77843)	+= max77843.o
+obj-$(CONFIG_MFD_MAX77833)	+= max77833.o max77833-irq.o
 obj-$(CONFIG_MFD_MAX77854)	+= max77854.o max77854-irq.o
 obj-$(CONFIG_MFD_MAX77865)	+= max77865.o max77865-irq.o
 obj-$(CONFIG_MFD_MAX8907)	+= max8907.o

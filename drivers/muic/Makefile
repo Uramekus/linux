@@ -6,6 +6,7 @@ obj-y					+= muic-core.o
 obj-$(CONFIG_MUIC_NOTIFIER)		+= muic_notifier.o
 obj-$(CONFIG_MUIC_MAX77854)		+= max77854-muic.o
 obj-$(CONFIG_HV_MUIC_MAX77854_AFC)	+= max77854-muic-afc.o
+obj-$(CONFIG_MUIC_MAX77833)		+= max77833-muic.o
 
 # MUIC_UNIVERSAL
 obj-$(CONFIG_MUIC_SUPPORT_CCIC)	+= universal/muic_ccic.o
